@@ -1,0 +1,130 @@
+# ==============================================================================
+# SCRIPT DE MANUTENÇÃO E HIGIENIZAÇÃO DE AMBIENTE
+# ==============================================================================
+
+# Garante que o script está rodando como Administrador
+if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Warning "Este script precisa de privilégios de Administrador. Reiniciando elevado..."
+    Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+    exit
+}
+
+Write-Host "==============================================" -ForegroundColor Cyan
+Write-Host " INICIANDO PROTOCOLO DE MANUTENÇÃO COMPLETA" -ForegroundColor Cyan
+Write-Host "==============================================" -ForegroundColor Cyan
+
+# ----------------------------------------------
+# 1. Atualizando pacotes nativos do sistema
+# ----------------------------------------------
+Write-Host "`n[1] Atualizando pacotes via Winget..." -ForegroundColor Yellow
+
+$wingetPath = Get-Command "winget.exe" -ErrorAction SilentlyContinue
+
+if ($wingetPath) {
+    Write-Host "-> Sincronizando repositórios e aplicando atualizações..." -ForegroundColor White
+    # Usando o call operator '&' para rodar de forma nativa e não bugar o Start-Process
+    & winget.exe upgrade --all --accept-source-agreements --accept-package-agreements
+} else {
+    Write-Host "[X] AVISO: winget.exe não encontrado no PATH atual. Atualização de pacotes ignorada." -ForegroundColor Red
+}
+Start-Sleep -Seconds 2
+
+# ----------------------------------------------
+# 2. Encerramento de processos
+# ----------------------------------------------
+Write-Host "`n[2] Finalizando processos de produtividade, desenvolvimento e conectividade..." -ForegroundColor Yellow
+$processos = @(
+    "chrome", "msedge", "msedgewebview2", "firefox", "opera", "browser", 
+    "WhatsApp", "Telegram", "Discord", "slack", 
+    "excel", "PBIDesktop", "winword", "outlook", "powerpnt", "onedrive", "Spotify",
+    "devenv", "code", "PacketTracer", "git", "git-credential-manager", "GitHubDesktop", "ssh-agent", "node", "Antigravity"
+)
+
+foreach ($proc in $processos) {
+    Get-Process -Name $proc -ErrorAction SilentlyContinue | Stop-Process -Force
+}
+Start-Sleep -Seconds 3
+
+# ----------------------------------------------
+# 3. Limpeza Profunda do Gerenciador de Credenciais
+# ----------------------------------------------
+Write-Host "`n[3] Eliminando chaves e tokens de autenticação do sistema..." -ForegroundColor Yellow
+cmdkey /list | Select-String "Alvo: (.*)" | ForEach-Object { 
+    $target = $_.Matches.Groups[1].Value
+    cmdkey /delete:$target > $null
+}
+
+# ----------------------------------------------
+# 4. Destruição de Diretórios de Sessão e Cache
+# ----------------------------------------------
+Write-Host "`n[4] Limpando rastros de login, configurações locais e IDEs..." -ForegroundColor Yellow
+$pathsToClear = @(
+    # Navegadores
+    "$env:LOCALAPPDATA\Google\Chrome\User Data",
+    "$env:LOCALAPPDATA\Microsoft\Edge\User Data",
+    "$env:APPDATA\Mozilla\Firefox\Profiles",
+    "$env:LOCALAPPDATA\Opera Software",
+    
+    # Microsoft Office, Power BI & Tokens
+    "$env:LOCALAPPDATA\Microsoft\Power BI Desktop",
+    "$env:APPDATA\Microsoft\Office",
+    "$env:LOCALAPPDATA\Microsoft\Office\16.0\Licensing",
+    "$env:LOCALAPPDATA\Microsoft\TokenBroker",
+
+    # Desenvolvimento: IDEs, Git, GitHub
+    "$env:APPDATA\GitHub Desktop",
+    "$env:LOCALAPPDATA\GitHubDesktop",
+    "$env:USERPROFILE\.gitconfig",
+    "$env:USERPROFILE\.ssh",
+    "$env:APPDATA\Code\User\globalStorage",
+    "$env:APPDATA\Code\User\Cache",
+    "$env:USERPROFILE\.vscode",
+    "$env:LOCALAPPDATA\Microsoft\VisualStudio",
+    "$env:APPDATA\Microsoft\VisualStudio",
+
+    # Redes: Cisco Packet Tracer
+    "$env:USERPROFILE\Cisco Packet Tracer",
+    
+    # IA & Outros
+    "$env:USERPROFILE\.gemini", 
+    "$env:USERPROFILE\.antigravity", 
+    "$env:APPDATA\Antigravity",
+
+    # Apps de Comunicação
+    "$env:LOCALAPPDATA\Packages\*WhatsApp*\LocalCache",
+    "$env:LOCALAPPDATA\Packages\*Microsoft.Office.Desktop*\LocalCache",
+    "$env:APPDATA\Telegram Desktop\tdata",
+    "$env:APPDATA\discord"
+)
+
+foreach ($path in $pathsToClear) {
+    $resolvedPaths = Resolve-Path -Path $path -ErrorAction SilentlyContinue
+    foreach ($rPath in $resolvedPaths) {
+        if (Test-Path $rPath.Path) {
+            Remove-Item -Path "$($rPath.Path)\*" -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# ----------------------------------------------
+# 5. Forçar o Logoff do OneDrive
+# ----------------------------------------------
+Write-Host "`n[5] Verificando e finalizando serviços de nuvem residuais..." -ForegroundColor Yellow
+if (Test-Path "$env:LOCALAPPDATA\Microsoft\OneDrive\onedrive.exe") {
+    Start-Process "$env:LOCALAPPDATA\Microsoft\OneDrive\onedrive.exe" -ArgumentList "/shutdown" -Wait -ErrorAction SilentlyContinue
+}
+
+# ----------------------------------------------
+# 6. Limpeza de rastro de DNS e Temporários
+# ----------------------------------------------
+Write-Host "`n[6] Finalizando limpeza de rede e arquivos voláteis..." -ForegroundColor Yellow
+ipconfig /flushdns > $null
+Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+Clear-RecycleBin -Force -ErrorAction SilentlyContinue
+
+Write-Host "`n==============================================" -ForegroundColor Green
+Write-Host "[V] PROTOCOLO CONCLUÍDO COM SUCESSO." -ForegroundColor Green
+Write-Host "A máquina foi atualizada e a sessão higienizada." -ForegroundColor Green
+Write-Host "==============================================" -ForegroundColor Green
+Write-Host "Pressione qualquer tecla para sair..." -ForegroundColor White
+$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
