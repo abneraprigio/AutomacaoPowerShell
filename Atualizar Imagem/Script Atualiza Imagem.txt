@@ -14,7 +14,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 # Força TLS 1.2 (Obrigatório para conexões com GitHub em builds antigas do Windows)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-# Caminhos Dinâmicos (Staging na pasta Temporária em vez de Program Files)
+# Caminhos Dinâmicos (Staging na pasta Temporária)
 $origemLockScreen = Join-Path -Path $env:TEMP -ChildPath "imagem_bloqueio.png"
 $origemWallpaper  = Join-Path -Path $env:TEMP -ChildPath "imagem_area_de_trabalho.png"
 
@@ -22,20 +22,22 @@ $origemWallpaper  = Join-Path -Path $env:TEMP -ChildPath "imagem_area_de_trabalh
 $destinoLockScreen = "C:\Windows\Web\Screen\img_bloqueio_corp.png"
 $destinoWallpaper  = "C:\Windows\Web\Wallpaper\img_desktop_corp.png"
 
-# Links Diretos (Raw) do GitHub
-$urlWallpaper = "https://raw.githubusercontent.com/abneraprigio/ATU_IMAGEM/main/imagem_area_de_trabalho.png"
-$urlLockScreen = "https://raw.githubusercontent.com/abneraprigio/ATU_IMAGEM/main/imagem_bloqueio.png"
+# Links Diretos (Raw) do Novo Repositório no GitHub
+$urlWallpaper = "https://raw.githubusercontent.com/abneraprigio/AutomacaoPowerShell/master/Atualizar%20Imagem/imagem_area_de_trabalho.png"
+$urlLockScreen = "https://raw.githubusercontent.com/abneraprigio/AutomacaoPowerShell/master/Atualizar%20Imagem/imagem_bloqueio.png"
 
 try {
     Write-Host "0. Verificando origem das imagens corporativas..." -ForegroundColor Cyan
     
-    # Lógica Inteligente: Verifica se as imagens estão na mesma pasta do script (C:\Users\admin\Desktop\Scripts\Atualizar Imagem)
-    $localWallpaper = Join-Path -Path $PSScriptRoot -ChildPath "imagem_area_de_trabalho.png"
-    $localLockScreen = Join-Path -Path $PSScriptRoot -ChildPath "imagem_bloqueio.png"
+    # Tratativa para execução direta no console (onde $PSScriptRoot é nulo)
+    $diretorioBase = if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) { $PWD.Path } else { $PSScriptRoot }
+    
+    $localWallpaper = Join-Path -Path $diretorioBase -ChildPath "imagem_area_de_trabalho.png"
+    $localLockScreen = Join-Path -Path $diretorioBase -ChildPath "imagem_bloqueio.png"
 
     # Processamento do Wallpaper
     if (Test-Path $localWallpaper) {
-        Write-Host "   -> Wallpaper encontrado localmente. Ignorando download." -ForegroundColor Gray
+        Write-Host "   -> Wallpaper encontrado localmente em $diretorioBase. Ignorando download." -ForegroundColor Gray
         Copy-Item -Path $localWallpaper -Destination $origemWallpaper -Force
     } else {
         Write-Host "   -> Baixando Wallpaper do GitHub..." -ForegroundColor Gray
@@ -44,7 +46,7 @@ try {
 
     # Processamento da Tela de Bloqueio
     if (Test-Path $localLockScreen) {
-        Write-Host "   -> Tela de bloqueio encontrada localmente. Ignorando download." -ForegroundColor Gray
+        Write-Host "   -> Tela de bloqueio encontrada localmente em $diretorioBase. Ignorando download." -ForegroundColor Gray
         Copy-Item -Path $localLockScreen -Destination $origemLockScreen -Force
     } else {
         Write-Host "   -> Baixando Tela de Bloqueio do GitHub..." -ForegroundColor Gray
