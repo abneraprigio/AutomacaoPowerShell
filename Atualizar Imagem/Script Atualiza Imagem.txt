@@ -1,0 +1,163 @@
+<#
+.SYNOPSIS
+    Script Unificado de Laboratório: Injeção de Hive + Bloqueio Cirúrgico + Download de Imagens
+    Aplica políticas de papel de parede e tela de bloqueio via HKLM e DIRETAMENTE no arquivo 
+    NTUSER.DAT. Bloqueia APENAS Store, Widgets e Jogos. Configura senhas para nunca expirarem.
+#>
+
+# Validação de Elevação de Privilégio
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Warning "ERRO: O script requer privilégios administrativos. Execute como Administrador."
+    Exit
+}
+
+# Força TLS 1.2 (Obrigatório para conexões com GitHub em builds antigas do Windows)
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# Caminhos Dinâmicos (Staging na pasta Temporária em vez de Program Files)
+$origemLockScreen = Join-Path -Path $env:TEMP -ChildPath "imagem_bloqueio.png"
+$origemWallpaper  = Join-Path -Path $env:TEMP -ChildPath "imagem_area_de_trabalho.png"
+
+# Destinos do Sistema Windows
+$destinoLockScreen = "C:\Windows\Web\Screen\img_bloqueio_corp.png"
+$destinoWallpaper  = "C:\Windows\Web\Wallpaper\img_desktop_corp.png"
+
+# Links Diretos (Raw) do GitHub
+$urlWallpaper = "https://raw.githubusercontent.com/abneraprigio/ATU_IMAGEM/main/imagem_area_de_trabalho.png"
+$urlLockScreen = "https://raw.githubusercontent.com/abneraprigio/ATU_IMAGEM/main/imagem_bloqueio.png"
+
+try {
+    Write-Host "0. Verificando origem das imagens corporativas..." -ForegroundColor Cyan
+    
+    # Lógica Inteligente: Verifica se as imagens estão na mesma pasta do script (C:\Users\admin\Desktop\Scripts\Atualizar Imagem)
+    $localWallpaper = Join-Path -Path $PSScriptRoot -ChildPath "imagem_area_de_trabalho.png"
+    $localLockScreen = Join-Path -Path $PSScriptRoot -ChildPath "imagem_bloqueio.png"
+
+    # Processamento do Wallpaper
+    if (Test-Path $localWallpaper) {
+        Write-Host "   -> Wallpaper encontrado localmente. Ignorando download." -ForegroundColor Gray
+        Copy-Item -Path $localWallpaper -Destination $origemWallpaper -Force
+    } else {
+        Write-Host "   -> Baixando Wallpaper do GitHub..." -ForegroundColor Gray
+        Invoke-WebRequest -Uri $urlWallpaper -OutFile $origemWallpaper -UseBasicParsing -ErrorAction Stop
+    }
+
+    # Processamento da Tela de Bloqueio
+    if (Test-Path $localLockScreen) {
+        Write-Host "   -> Tela de bloqueio encontrada localmente. Ignorando download." -ForegroundColor Gray
+        Copy-Item -Path $localLockScreen -Destination $origemLockScreen -Force
+    } else {
+        Write-Host "   -> Baixando Tela de Bloqueio do GitHub..." -ForegroundColor Gray
+        Invoke-WebRequest -Uri $urlLockScreen -OutFile $origemLockScreen -UseBasicParsing -ErrorAction Stop
+    }
+
+    Write-Host "1. Movendo arquivos para C:\Windows e ajustando permissões (S-1-1-0)..." -ForegroundColor Cyan
+    
+    # Verifica e move Tela de Bloqueio
+    if (Test-Path $origemLockScreen) {
+        Copy-Item -Path $origemLockScreen -Destination $destinoLockScreen -Force
+        icacls $destinoLockScreen /grant "*S-1-1-0:(R)" /c /q | Out-Null
+        Remove-Item -Path $origemLockScreen -Force -ErrorAction SilentlyContinue
+    }
+
+    # Verifica e move Papel de Parede
+    if (Test-Path $origemWallpaper) {
+        Copy-Item -Path $origemWallpaper -Destination $destinoWallpaper -Force
+        icacls $destinoWallpaper /grant "*S-1-1-0:(R)" /c /q | Out-Null
+        Remove-Item -Path $origemWallpaper -Force -ErrorAction SilentlyContinue
+    }
+
+    Write-Host "2. Configurando Políticas de Máquina (HKLM - Personalização, Store e Widgets)..." -ForegroundColor Cyan
+    
+    # Trava a Tela de Bloqueio
+    $regPathPers = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization"
+    if (-not (Test-Path $regPathPers)) { New-Item $regPathPers -Force | Out-Null }
+    Set-ItemProperty -Path $regPathPers -Name "LockScreenImage" -Value $destinoLockScreen -Force
+    Set-ItemProperty -Path $regPathPers -Name "NoChangingLockScreen" -Value 1 -Force
+
+    # Trava o Papel de Parede (System)
+    $regPathSys = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+    if (-not (Test-Path $regPathSys)) { New-Item $regPathSys -Force | Out-Null }
+    Set-ItemProperty -Path $regPathSys -Name "Wallpaper" -Value $destinoWallpaper -Force
+    Set-ItemProperty -Path $regPathSys -Name "WallpaperStyle" -Value "2" -Force
+
+    # Trava o Papel de Parede (ActiveDesktop)
+    $regPathAD = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\ActiveDesktop"
+    if (-not (Test-Path $regPathAD)) { New-Item $regPathAD -Force | Out-Null }
+    Set-ItemProperty -Path $regPathAD -Name "NoChangingWallPaper" -Value 1 -Force
+
+    # Bloqueio da Microsoft Store (Preservando apps nativos)
+    $regStore = "HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore"
+    if (-not (Test-Path $regStore)) { New-Item $regStore -Force | Out-Null }
+    Set-ItemProperty -Path $regStore -Name "RemoveWindowsStore" -Value 1 -Force
+    Remove-ItemProperty -Path $regStore -Name "DisableStoreApps" -ErrorAction SilentlyContinue
+
+    # Desativa Widgets
+    $regDsh = "HKLM:\SOFTWARE\Policies\Microsoft\Dsh"
+    if (-not (Test-Path $regDsh)) { New-Item $regDsh -Force | Out-Null }
+    Set-ItemProperty -Path $regDsh -Name "AllowNewsAndInterests" -Value 0 -Force
+
+    Write-Host "3. Injetando políticas nos perfis de usuários (NTUSER.DAT)..." -ForegroundColor Cyan
+    
+    $usersPath = "C:\Users"
+    $profiles = Get-ChildItem -Path $usersPath -Directory -Force | Where-Object { $_.Name -notmatch "Public|All Users" }
+    $profiles += Get-Item "$usersPath\Default" -Force
+
+    foreach ($profile in $profiles) {
+        $ntuserPath = "$($profile.FullName)\NTUSER.DAT"
+        if (Test-Path $ntuserPath) {
+            Write-Host "   -> Injetando no Perfil: $($profile.Name)" -ForegroundColor Gray
+            
+            if ($profile.FullName -eq $env:USERPROFILE) {
+                $baseReg = "HKCU:"
+                $isLoaded = $false
+            } else {
+                $hiveName = "TempHive_$($profile.Name -replace ' ','')"
+                & reg load "HKU\$hiveName" "$ntuserPath" | Out-Null
+                $baseReg = "Registry::HKEY_USERS\$hiveName"
+                $isLoaded = $true
+            }
+
+            # Injeção direta no registro do usuário
+            $desktopPath = "$baseReg\Control Panel\Desktop"
+            if (-not (Test-Path $desktopPath)) { New-Item $desktopPath -Force | Out-Null }
+            Set-ItemProperty -Path $desktopPath -Name "Wallpaper" -Value $destinoWallpaper -Force
+            Set-ItemProperty -Path $desktopPath -Name "WallpaperStyle" -Value "2" -Force
+
+            $policyPath = "$baseReg\Software\Microsoft\Windows\CurrentVersion\Policies\System"
+            if (-not (Test-Path $policyPath)) { New-Item $policyPath -Force | Out-Null }
+            Set-ItemProperty -Path $policyPath -Name "Wallpaper" -Value $destinoWallpaper -Force
+
+            if ($isLoaded) {
+                # Força a liberação do arquivo NTUSER.DAT antes de descarregar a Hive
+                [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+                & reg unload "HKU\$hiveName" | Out-Null
+            }
+            
+            # Limpeza de Cache de Temas
+            $themeCache = "$($profile.FullName)\AppData\Roaming\Microsoft\Windows\Themes"
+            if (Test-Path "$themeCache\TranscodedWallpaper") { Remove-Item "$themeCache\TranscodedWallpaper" -Force -ErrorAction SilentlyContinue }
+            if (Test-Path "$themeCache\CachedFiles") { Remove-Item "$themeCache\CachedFiles\*" -Force -Recurse -ErrorAction SilentlyContinue }
+        }
+    }
+
+    Write-Host "4. Removendo Jogos e Bloatware..." -ForegroundColor Cyan
+    $appsToRemove = @("*XboxApp*", "*XboxGamingOverlay*", "*XboxGameOverlay*", "*GamingServices*", "*SolitaireCollection*", "*CandyCrush*")
+    foreach ($app in $appsToRemove) {
+        Get-AppxPackage -Name $app -AllUsers | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+        Get-AppxProvisionedPackage -Online | Where-Object DisplayName -like $app | Remove-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue
+    }
+
+    Write-Host "5. Ajustando validade das senhas..." -ForegroundColor Cyan
+    Get-LocalUser | Set-LocalUser -PasswordNeverExpires $true
+
+    Write-Host "6. Atualizando sistema e reiniciando Explorer..." -ForegroundColor Cyan
+    gpupdate /force | Out-Null
+    Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+
+    Write-Host "`n[SUCESSO] Imagens configuradas e políticas aplicadas com sucesso!" -ForegroundColor Green
+}
+catch {
+    Write-Host "`n[ERRO] Ocorreu uma falha na execução:" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+}
