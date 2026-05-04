@@ -1,0 +1,116 @@
+# ==============================================================================
+# SCRIPT DE MANUTENÇÃO E HIGIENIZAÇÃO DE AMBIENTE (OTIMIZADO)
+# ==============================================================================
+param (
+    # Switch para rodar o Winget apenas em manutenções profundas (ex: final de semana)
+    # Uso: .\higieniza.ps1 -UpdatePackages
+    [switch]$UpdatePackages 
+)
+
+# Garante privilégios de Administrador de forma limpa
+if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Warning "Elevando para Administrador..."
+    Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+    exit
+}
+
+Write-Host "==============================================" -ForegroundColor Cyan
+Write-Host " INICIANDO PROTOCOLO DE HIGIENIZAÇÃO EXPRESSA" -ForegroundColor Cyan
+Write-Host "==============================================" -ForegroundColor Cyan
+
+# ----------------------------------------------
+# 1. Atualização de Pacotes (Opcional)
+# ----------------------------------------------
+if ($UpdatePackages) {
+    Write-Host "`n[1] Atualizando pacotes via Winget..." -ForegroundColor Yellow
+    if (Get-Command "winget.exe" -ErrorAction SilentlyContinue) {
+        & winget.exe upgrade --all --accept-source-agreements --accept-package-agreements
+    }
+} else {
+    Write-Host "`n[1] Pulo: Atualização de pacotes ignorada (Modo Rápido)." -ForegroundColor DarkGray
+}
+
+# ----------------------------------------------
+# 2. Encerramento de Processos em Lote (Otimizado)
+# ----------------------------------------------
+Write-Host "`n[2] Finalizando processos ativos..." -ForegroundColor Yellow
+$processos = "chrome", "msedge", "msedgewebview2", "firefox", "opera", "WhatsApp", "Telegram", "Discord", "slack", "excel", "PBIDesktop", "winword", "outlook", "powerpnt", "onedrive", "Spotify", "devenv", "code", "PacketTracer", "git", "git-credential-manager", "GitHubDesktop", "ssh-agent", "node", "Antigravity", "notepad"
+
+# Comando único e massivo (muito mais rápido que usar ForEach)
+Stop-Process -Name $processos -Force -ErrorAction SilentlyContinue
+
+# ----------------------------------------------
+# 3. Limpeza da Área de Trabalho (Excluindo Atalhos)
+# ----------------------------------------------
+Write-Host "`n[3] Limpando arquivos e pastas de alunos na Área de Trabalho..." -ForegroundColor Yellow
+$desktopPath = [Environment]::GetFolderPath("Desktop")
+# Destrói tudo, exceto atalhos (.lnk) e arquivos de configuração (.ini)
+Get-ChildItem -Path $desktopPath -Exclude *.lnk, *.ini -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
+# ----------------------------------------------
+# 4. Limpeza Profunda de Credenciais
+# ----------------------------------------------
+Write-Host "`n[4] Eliminando chaves e tokens do Windows Vault..." -ForegroundColor Yellow
+cmdkey /list | Select-String "Alvo: (.*)" | ForEach-Object { 
+    $target = $_.Matches.Groups[1].Value
+    cmdkey /delete:$target > $null
+}
+
+# ----------------------------------------------
+# 5. Destruição de Diretórios de Sessão e Cache (Pipeline Direto)
+# ----------------------------------------------
+Write-Host "`n[5] Limpando rastros de sessão e IDEs..." -ForegroundColor Yellow
+$pathsToClear = @(
+    "$env:LOCALAPPDATA\Google\Chrome\User Data\*",
+    "$env:LOCALAPPDATA\Microsoft\Edge\User Data\*",
+    "$env:APPDATA\Mozilla\Firefox\Profiles\*",
+    "$env:LOCALAPPDATA\Opera Software\*",
+    "$env:LOCALAPPDATA\Microsoft\Power BI Desktop\*",
+    "$env:APPDATA\Microsoft\Office\*",
+    "$env:LOCALAPPDATA\Microsoft\Office\16.0\Licensing\*",
+    "$env:LOCALAPPDATA\Microsoft\TokenBroker\*",
+    "$env:APPDATA\GitHub Desktop\*",
+    "$env:LOCALAPPDATA\GitHubDesktop\*",
+    "$env:USERPROFILE\.gitconfig",
+    "$env:USERPROFILE\.ssh\*",
+    "$env:APPDATA\Code\User\globalStorage\*",
+    "$env:APPDATA\Code\User\Cache\*",
+    "$env:USERPROFILE\.vscode\*",
+    "$env:LOCALAPPDATA\Microsoft\VisualStudio\*",
+    "$env:APPDATA\Microsoft\VisualStudio\*",
+    "$env:USERPROFILE\Cisco Packet Tracer\*",
+    "$env:USERPROFILE\.gemini\*", 
+    "$env:USERPROFILE\.antigravity\*", 
+    "$env:APPDATA\Antigravity\*",
+    "$env:LOCALAPPDATA\Packages\*WhatsApp*\LocalCache\*",
+    "$env:LOCALAPPDATA\Packages\*Microsoft.Office.Desktop*\LocalCache\*",
+    "$env:APPDATA\Telegram Desktop\tdata\*",
+    "$env:APPDATA\discord\*",
+    # Destruição de abas e rascunhos do Bloco de Notas (Windows 11)
+    "$env:LOCALAPPDATA\Packages\Microsoft.WindowsNotepad_8wekyb3d8bbwe\LocalState\TabState\*",
+    "$env:LOCALAPPDATA\Packages\Microsoft.WindowsNotepad_8wekyb3d8bbwe\LocalState\WindowStates\*"
+)
+
+# Uso direto de wildcard (*) com Remove-Item evita a necessidade de Resolve-Path
+Remove-Item -Path $pathsToClear -Recurse -Force -ErrorAction SilentlyContinue
+
+# ----------------------------------------------
+# 6. Desconexão de Nuvem
+# ----------------------------------------------
+Write-Host "`n[6] Derrubando serviços de Nuvem residuais..." -ForegroundColor Yellow
+if (Test-Path "$env:LOCALAPPDATA\Microsoft\OneDrive\onedrive.exe") {
+    Start-Process "$env:LOCALAPPDATA\Microsoft\OneDrive\onedrive.exe" -ArgumentList "/shutdown" -Wait -ErrorAction SilentlyContinue
+}
+
+# ----------------------------------------------
+# 7. Limpeza de Rede e Temporários
+# ----------------------------------------------
+Write-Host "`n[7] Esvaziando Lixeira, Temp e DNS..." -ForegroundColor Yellow
+ipconfig /flushdns > $null
+Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+Clear-RecycleBin -Force -ErrorAction SilentlyContinue
+
+Write-Host "`n==============================================" -ForegroundColor Green
+Write-Host "[V] HIGIENIZAÇÃO CONCLUÍDA COM SUCESSO." -ForegroundColor Green
+Write-Host "==============================================" -ForegroundColor Green
+Start-Sleep -Seconds 2
