@@ -4,6 +4,20 @@ Coleção de scripts PowerShell para gerenciamento de máquinas em laboratório.
 
 ---
 
+## Instalação Rápida
+
+> **Execute como Administrador** no PowerShell da máquina do laboratório.
+
+### Configurar Reset Automático ao Logon (Setup-LabTask)
+
+```powershell
+irm "https://raw.githubusercontent.com/abneraprigio/AutomacaoPowerShell/main/Implementa%C3%A7%C3%A3o/Setup-LabTask.ps1" | iex
+```
+
+Baixa e executa o `Setup-LabTask.ps1` diretamente do GitHub — faz o download do `Reset-LabSession - Adm.ps1` para `C:\Arquivo de Programas\` e registra a tarefa agendada `ResetLabSession` (SYSTEM, logon do usuário **aluno**).
+
+---
+
 ## Índice
 
 - [Script Desloga Usuarios](#apaga-registros--script-desloga-usuariostxt)
