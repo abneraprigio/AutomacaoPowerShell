@@ -12,6 +12,7 @@ Coleção de scripts PowerShell para gerenciamento de máquinas em laboratório.
 - [Lab-Cleanup-Wrapper](#implementação--lab-cleanup-wrapperps1)
 - [Reset-LabSession (Admin)](#resetlab--reset-labsession---admps1)
 - [Reset de Sessão (Usuário)](#resetlab--script-de-reset-de-sessão-para-usuáriotxt)
+- [Setup-LabTask](#implementação--setup-labtaskps1)
 
 ---
 
@@ -47,3 +48,8 @@ Reset completo de sessão (modo Administrador). Encerra processos, limpa navegad
 
 ### `ResetLab / Script de Reset de Sessão para Usuário.txt`
 Mesma cobertura do script Admin, porém executável pelo próprio aluno sem privilégios elevados. Limpa o perfil do usuário atual usando variáveis de ambiente do próprio contexto.
+
+---
+
+### `Implementação / Setup-LabTask.ps1`
+Script de configuração inicial executado pelo Administrador. Realiza o download automático do script `Reset-LabSession - Adm.ps1` do GitHub para `C:\Arquivo de Programas\` e registra a Tarefa Agendada `ResetLabSession` (executa como SYSTEM no logon do usuário **aluno**). Inclui validação de privilégios, verificação de integridade do arquivo baixado e confirmação final do ambiente configurado.
