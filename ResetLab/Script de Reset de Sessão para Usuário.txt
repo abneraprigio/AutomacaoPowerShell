@@ -5,303 +5,357 @@
     Reset-LabSession.ps1 — Script de Wipe/Reset de Sessão para Laboratório
 
 .DESCRIPTION
-    Restaura o computador ao estado "limpo e original" ao final de cada sessão de aluno.
-    Executável por usuário COMUM. Limpa apenas o perfil de quem executou o script.
-    Encerra processos, apaga perfis de navegadores, tokens Microsoft, configurações de
-    ferramentas de desenvolvimento, limpa a Área de Trabalho e realiza RESTAURAÇÃO COMPLETA
-    das pastas pessoais do usuário (Downloads, Documentos, Fotos e Vídeos).
+    Restaura o computador ao estado "limpo e original" ao final de cada sessão.
+    Roda em contexto de USUÁRIO COMUM. Limpa apenas o perfil de quem executa.
+
+    Garantias deste script:
+    • PASTAS PESSOAIS: apaga TODO o conteúdo (Desktop, Downloads, Documentos,
+      Fotos, Vídeos, Música), MAS NUNCA apaga a pasta em si.
+    • NAVEGADORES: apagam User Data INTEIRO (Chrome, Edge, Firefox, Opera) —
+      contas, favoritos, senhas, sessões, extensões: ZERO rastro do usuário.
+    • APPS: desloga Office, PowerBI, Windows (WAM/OneAuth), Copilot, Antigravity,
+      Git/GitHub, Cisco Packet Tracer, VS Code, Google Drive.
 
 .NOTES
-    Versão : 3.2 (User Mode)
+    Versão : 4.0 (User Mode — Reset Total)
     Requer : PowerShell 5.1+
-    Changelog v3.2:
-        - [CHROME] Módulo reescrito: reset total como "primeira abertura"
-          * Apaga pasta Default inteira (em vez de arquivos avulsos)
-          * Remove arquivo sentinel "First Run" (dispara boas-vindas na próxima abertura)
-          * Remove "Local State" completamente (sem sobrescrever parcialmente)
-          * Remove caches globais: ShaderCache, GrShaderCache, BrowserMetrics, etc.
-          * Cobre variantes: Chrome Beta, Chrome Dev e Chrome Canary (SxS)
-          * Apaga todos os perfis extras (Profile 1, Profile 2, ...) via wildcard
+    Changelog v4.0:
+        - [PASTAS PESSOAIS] Resolução robusta via [Environment]::GetFolderPath
+          + leitura do registro para Downloads. Trata atributos read-only/hidden
+          /system antes de apagar. Usa -LiteralPath para caracteres especiais.
+        - [NAVEGADORES] Apaga User Data INTEIRO (não só Default). Inclui Beta,
+          Dev, Canary do Chrome/Edge.
+        - [WAM/OneAuth] Limpa Web Account Manager, OneAuth, IdentityCache,
+          PasswordVault — onde Office/Windows/Copilot guardam tokens.
+        - [COPILOT] Microsoft 365 Copilot + GitHub Copilot adicionados.
+        - [GOOGLE DRIVE] Limpeza de DriveFS adicionada.
+        - [LOG] Contadores de sucesso/falha por etapa.
 #>
 
 # ==============================================================================
 # BLOCO 1 — CONFIGURAÇÃO GLOBAL E FUNÇÕES AUXILIARES
 # ==============================================================================
 
-# Impede que erros não críticos interrompam o script globalmente.
 $ErrorActionPreference = "SilentlyContinue"
 
-# Captura o perfil do usuário atualmente logado usando variáveis de ambiente.
-# Como roda no contexto do próprio usuário, ele tem permissão total sobre essas pastas.
 $TargetProfile = $env:USERPROFILE
 $TargetUser    = $env:USERNAME
 
+# Contadores globais para relatório final
+$Script:TotalDeleted = 0
+$Script:TotalFailed  = 0
+
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host " RESET DE SESSÃO DE LABORATÓRIO — Iniciando..."              -ForegroundColor Cyan
+Write-Host " RESET DE SESSÃO DE LABORATÓRIO v4.0 — Iniciando..."         -ForegroundColor Cyan
 Write-Host " Perfil alvo : $TargetProfile"                               -ForegroundColor Cyan
 Write-Host " Usuário alvo: $TargetUser"                                  -ForegroundColor Cyan
-Write-Host " Modo        : Usuário Comum"                                -ForegroundColor Cyan
+Write-Host " Modo        : Usuário Comum — Reset Total"                  -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host ""
 
-# --- Função auxiliar: remove caminhos com segurança (arquivo ou pasta) ---
-function Remove-ItemSafe {
-    param([string[]]$Paths)
-    foreach ($p in $Paths) {
-        if (Test-Path $p) {
-            Remove-Item -Path $p -Recurse -Force -ErrorAction SilentlyContinue
-            Write-Host "   [DEL] $p" -ForegroundColor DarkGray
+# ------------------------------------------------------------------------------
+# FUNÇÃO: Force-RemoveItem — remove arquivo/pasta de forma agressiva
+# Trata atributos read-only/hidden/system. Usa LiteralPath para caracteres
+# especiais ([, ], &, etc.). Tenta múltiplas estratégias antes de desistir.
+# ------------------------------------------------------------------------------
+function Force-RemoveItem {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) { return $true }
+
+    try {
+        # Estratégia 1: limpa atributos especiais e remove
+        Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                try { $_.Attributes = 'Normal' } catch {}
+            }
+
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+        if ($item) {
+            try { $item.Attributes = 'Normal' } catch {}
+        }
+
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+        $Script:TotalDeleted++
+        return $true
+    } catch {
+        # Estratégia 2: usa .NET diretamente (mais agressivo que Remove-Item)
+        try {
+            if ((Get-Item -LiteralPath $Path -Force).PSIsContainer) {
+                [System.IO.Directory]::Delete($Path, $true)
+            } else {
+                [System.IO.File]::Delete($Path)
+            }
+            $Script:TotalDeleted++
+            return $true
+        } catch {
+            # Estratégia 3: cmd /c rd /s /q (último recurso)
+            try {
+                if ((Get-Item -LiteralPath $Path -Force).PSIsContainer) {
+                    cmd /c "rd /s /q `"$Path`"" 2>$null | Out-Null
+                } else {
+                    cmd /c "del /f /q `"$Path`"" 2>$null | Out-Null
+                }
+                if (-not (Test-Path -LiteralPath $Path)) {
+                    $Script:TotalDeleted++
+                    return $true
+                }
+            } catch {}
+
+            $Script:TotalFailed++
+            return $false
         }
     }
 }
 
-# --- Função auxiliar: mata um processo pelo nome, ignorando se não existir ---
+# ------------------------------------------------------------------------------
+# FUNÇÃO: Remove-Paths — wrapper que itera lista de caminhos
+# ------------------------------------------------------------------------------
+function Remove-Paths {
+    param([string[]]$Paths)
+    foreach ($p in $Paths) {
+        # Suporta wildcards (Profile *, OneDrive - *, etc.)
+        if ($p -match '[*?]') {
+            $resolved = Resolve-Path -Path $p -ErrorAction SilentlyContinue
+            foreach ($r in $resolved) {
+                if (Force-RemoveItem -Path $r.Path) {
+                    Write-Host "   [DEL] $($r.Path)" -ForegroundColor DarkGray
+                }
+            }
+        } else {
+            if (Test-Path -LiteralPath $p) {
+                if (Force-RemoveItem -Path $p) {
+                    Write-Host "   [DEL] $p" -ForegroundColor DarkGray
+                }
+            }
+        }
+    }
+}
+
+# ------------------------------------------------------------------------------
+# FUNÇÃO: Stop-ProcessSafe — encerra processo + filhos, ignora se não existe
+# ------------------------------------------------------------------------------
 function Stop-ProcessSafe {
     param([string]$ProcessName)
     $procs = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue
     if ($procs) {
-        # /F = forçar | /T = encerrar árvore de processos filhos também
         taskkill /F /T /IM "$ProcessName.exe" 2>$null | Out-Null
         Write-Host "   [KILL] $ProcessName" -ForegroundColor DarkGray
     }
 }
 
-# ==============================================================================
-# BLOCO 2 — ENCERRAMENTO FORÇADO DE PROCESSOS (FILE LOCKS)
-# ==============================================================================
-
-Write-Host "[ETAPA 1/7] Encerrando processos ativos..." -ForegroundColor Yellow
-
-$ProcessList = @(
-    "chrome", "chrome_crashpad_handler",
-    "msedge", "firefox", "opera", "opera_autoupdate",
-    "WINWORD", "EXCEL", "POWERPNT", "OUTLOOK", "ONENOTE", "MSPUB", "MSACCESS",
-    "lync", "Teams", "Teams2",
-    "PBIDesktop",
-    "Code", "GithubDesktop", "git", "node", "npm", "python", "pythonw", "java", "javaw",
-    "PacketTracer", "PacketTracer8", "Antigravity",
-    "notepad", "WindowsNotepad"
-)
-
-foreach ($proc in $ProcessList) {
-    Stop-ProcessSafe -ProcessName $proc
+# ------------------------------------------------------------------------------
+# FUNÇÃO: Remove-RegistryKey — remove chave de registro com segurança
+# ------------------------------------------------------------------------------
+function Remove-RegistryKey {
+    param([string]$KeyPath)
+    if (Test-Path $KeyPath) {
+        try {
+            Remove-Item -Path $KeyPath -Recurse -Force -ErrorAction Stop
+            Write-Host "   [DEL REG] $KeyPath" -ForegroundColor DarkGray
+        } catch {
+            Write-Host "   [FAIL REG] $KeyPath — $($_.Exception.Message)" -ForegroundColor DarkRed
+        }
+    }
 }
 
+# ==============================================================================
+# BLOCO 2 — ENCERRAMENTO FORÇADO DE PROCESSOS (LIBERA FILE LOCKS)
+# ==============================================================================
+
+Write-Host "[ETAPA 1/8] Encerrando processos ativos..." -ForegroundColor Yellow
+
+$ProcessList = @(
+    # Navegadores (todas as variantes)
+    "chrome", "chrome_crashpad_handler",
+    "msedge", "msedgewebview2",
+    "firefox", "firefox-bin",
+    "opera", "opera_autoupdate", "opera_gx",
+    # Office completo
+    "WINWORD", "EXCEL", "POWERPNT", "OUTLOOK", "ONENOTE", "MSPUB", "MSACCESS",
+    "MSOSYNC", "MSOUC", "ai", "msoia",
+    # Comunicação
+    "lync", "Teams", "Teams2", "ms-teams", "Skype",
+    # Análise/BI
+    "PBIDesktop", "msmdsrv",
+    # Dev
+    "Code", "Code - Insiders", "GithubDesktop", "git", "ssh-agent",
+    "node", "npm", "python", "pythonw", "java", "javaw", "devenv",
+    # Educacional
+    "PacketTracer", "PacketTracer8", "Antigravity",
+    # Bloco de Notas Win11
+    "notepad", "WindowsNotepad",
+    # Copilot
+    "Copilot",
+    # Google Drive
+    "GoogleDriveFS", "googledrivesync",
+    # OneDrive
+    "OneDrive"
+)
+
+foreach ($proc in $ProcessList) { Stop-ProcessSafe -ProcessName $proc }
 Start-Sleep -Seconds 2
 Write-Host " [OK] Processos encerrados." -ForegroundColor Green
 
 # ==============================================================================
-# BLOCO 3 — LIMPEZA DE NAVEGADORES (PERFIS, CACHE, HISTÓRICO, SESSÕES)
+# BLOCO 3 — NAVEGADORES (RESET TOTAL — APAGA USER DATA INTEIRO)
 # ==============================================================================
 
 Write-Host ""
-Write-Host "[ETAPA 2/7] Limpando perfis e dados de navegadores..." -ForegroundColor Yellow
+Write-Host "[ETAPA 2/8] RESET TOTAL dos navegadores (sem rastros)..." -ForegroundColor Yellow
 
 # ------------------------------------------------------------------------------
-# 3.1 GOOGLE CHROME — Reset Total ("como se fosse a primeira vez")
+# 3.1 GOOGLE CHROME (todas as variantes)
+# Apaga User Data INTEIRO. Próxima abertura: tela de boas-vindas.
 # ------------------------------------------------------------------------------
-Write-Host " -> Google Chrome" -ForegroundColor White
+Write-Host " -> Google Chrome (todas as variantes)" -ForegroundColor White
 
-function Reset-ChromeProfile {
-    param([string]$UserDataPath, [string]$Label)
+$ChromeRoots = @(
+    "$TargetProfile\AppData\Local\Google\Chrome\User Data",
+    "$TargetProfile\AppData\Local\Google\Chrome Beta\User Data",
+    "$TargetProfile\AppData\Local\Google\Chrome Dev\User Data",
+    "$TargetProfile\AppData\Local\Google\Chrome SxS\User Data",
+    "$TargetProfile\AppData\Roaming\Google\Chrome"
+)
+Remove-Paths -Paths $ChromeRoots
 
-    if (-not (Test-Path $UserDataPath)) {
-        Write-Host "   [SKIP] $Label não encontrado." -ForegroundColor DarkGray
-        return
-    }
-
-    Write-Host "   [RESET] $Label — apagando dados..." -ForegroundColor DarkGray
-
-    # 1. Apaga a pasta Default INTEIRA (perfil principal: histórico, senhas,
-    #    cookies, sessões, extensões, preferências, dados de formulários, etc.)
-    Remove-ItemSafe -Paths @("$UserDataPath\Default")
-
-    # 2. Remove o arquivo sentinel "First Run".
-    #    Quando ausente, o Chrome exibe a tela de boas-vindas/configuração
-    #    na próxima abertura — exatamente o comportamento de "primeira vez".
-    Remove-ItemSafe -Paths @("$UserDataPath\First Run")
-
-    # 3. Remove o "Local State" completamente.
-    #    Contém: lista de perfis, última conta sincronizada, flags globais,
-    #    preferências de idioma e outras configurações entre perfis.
-    Remove-ItemSafe -Paths @("$UserDataPath\Local State")
-
-    # 4. Remove todos os perfis extras criados pelo usuário (Profile 1, 2, ...)
-    Get-ChildItem -Path $UserDataPath -Directory -Filter "Profile *" -ErrorAction SilentlyContinue |
-        ForEach-Object { Remove-ItemSafe -Paths @($_.FullName) }
-
-    # 5. Remove caches e dados globais (nível User Data, fora do Default)
-    $GlobalCaches = @(
-        "$UserDataPath\BrowserMetrics",            # Métricas de desempenho e uso
-        "$UserDataPath\BrowserMetrics-spare.pma",
-        "$UserDataPath\CrashpadMetrics-active.pma",
-        "$UserDataPath\GrShaderCache",             # Cache de shaders gráficos (GPU)
-        "$UserDataPath\ShaderCache",               # Cache de shaders legado
-        "$UserDataPath\Segmentation Platform",     # Dados de segmentação de usuário
-        "$UserDataPath\component_crx_cache",       # Cache de componentes baixados
-        "$UserDataPath\WidevineCdm",               # DRM — recriado automaticamente
-        "$UserDataPath\ZxcvbnData",                # Dados do verificador de senhas
-        "$UserDataPath\CertificateRevocation",     # Cache de revogação de certificados
-        "$UserDataPath\CrashReports",              # Relatórios de falha armazenados
-        "$UserDataPath\Crashpad",                  # Metadados do Crashpad
-        "$UserDataPath\optimization_guide",        # Guias de otimização de página
-        "$UserDataPath\SafetyTips"                 # Avisos de segurança em cache
-    )
-    Remove-ItemSafe -Paths $GlobalCaches
-
-    Write-Host "   [OK] $Label resetado — próxima abertura será como a primeira vez." -ForegroundColor Green
-}
-
-# Chrome Estável
-Reset-ChromeProfile `
-    -UserDataPath "$TargetProfile\AppData\Local\Google\Chrome\User Data" `
-    -Label "Google Chrome (Estável)"
-
-# Chrome Beta
-Reset-ChromeProfile `
-    -UserDataPath "$TargetProfile\AppData\Local\Google\Chrome Beta\User Data" `
-    -Label "Google Chrome Beta"
-
-# Chrome Dev
-Reset-ChromeProfile `
-    -UserDataPath "$TargetProfile\AppData\Local\Google\Chrome Dev\User Data" `
-    -Label "Google Chrome Dev"
-
-# Chrome Canary (SxS)
-Reset-ChromeProfile `
-    -UserDataPath "$TargetProfile\AppData\Local\Google\Chrome SxS\User Data" `
-    -Label "Google Chrome Canary"
+Remove-RegistryKey -KeyPath "HKCU:\Software\Google\Chrome"
 
 # ------------------------------------------------------------------------------
-# 3.2 MICROSOFT EDGE
+# 3.2 MICROSOFT EDGE (todas as variantes)
+# Apaga User Data INTEIRO. Próxima abertura: setup do zero.
 # ------------------------------------------------------------------------------
-Write-Host " -> Microsoft Edge" -ForegroundColor White
+Write-Host " -> Microsoft Edge (todas as variantes)" -ForegroundColor White
 
-$EdgePaths = @(
-    "$TargetProfile\AppData\Local\Microsoft\Edge\User Data\Default\Cache",
-    "$TargetProfile\AppData\Local\Microsoft\Edge\User Data\Default\Code Cache",
-    "$TargetProfile\AppData\Local\Microsoft\Edge\User Data\Default\History",
-    "$TargetProfile\AppData\Local\Microsoft\Edge\User Data\Default\Cookies",
-    "$TargetProfile\AppData\Local\Microsoft\Edge\User Data\Default\Login Data",
-    "$TargetProfile\AppData\Local\Microsoft\Edge\User Data\Default\Web Data",
-    "$TargetProfile\AppData\Local\Microsoft\Edge\User Data\Default\Sessions",
-    "$TargetProfile\AppData\Local\Microsoft\Edge\User Data\Default\Session Storage",
-    "$TargetProfile\AppData\Local\Microsoft\Edge\User Data\Default\Local Storage",
-    "$TargetProfile\AppData\Local\Microsoft\Edge\User Data\Default\IndexedDB",
-    "$TargetProfile\AppData\Local\Microsoft\Edge\User Data\Default\Network",
-    "$TargetProfile\AppData\Local\Microsoft\Edge\User Data\Profile*",
+$EdgeRoots = @(
+    "$TargetProfile\AppData\Local\Microsoft\Edge\User Data",
+    "$TargetProfile\AppData\Local\Microsoft\Edge Beta\User Data",
+    "$TargetProfile\AppData\Local\Microsoft\Edge Dev\User Data",
+    "$TargetProfile\AppData\Local\Microsoft\Edge SxS\User Data",
     "$TargetProfile\AppData\Roaming\Microsoft\Edge"
 )
-Remove-ItemSafe -Paths $EdgePaths
+Remove-Paths -Paths $EdgeRoots
 
-$EdgeLocalState = "$TargetProfile\AppData\Local\Microsoft\Edge\User Data\Local State"
-if (Test-Path $EdgeLocalState) {
-    '{"browser":{"enabled_labs_experiments":[]}}' | Set-Content -Path $EdgeLocalState -Force
-    Write-Host "   [RESET] Edge Local State redefinido." -ForegroundColor DarkGray
-}
+Remove-RegistryKey -KeyPath "HKCU:\Software\Microsoft\Edge"
 
 # ------------------------------------------------------------------------------
 # 3.3 MOZILLA FIREFOX
+# Apaga pasta Mozilla INTEIRA — perfis, profiles.ini, instalações lembradas.
 # ------------------------------------------------------------------------------
 Write-Host " -> Mozilla Firefox" -ForegroundColor White
 
-$FirefoxProfilesRoot = "$TargetProfile\AppData\Roaming\Mozilla\Firefox\Profiles"
-if (Test-Path $FirefoxProfilesRoot) {
-    Get-ChildItem -Path $FirefoxProfilesRoot -Directory | ForEach-Object {
-        $ffProfile    = $_.FullName
-        $FirefoxItems = @(
-            "$ffProfile\cache2",                   "$ffProfile\cookies.sqlite",
-            "$ffProfile\places.sqlite",            "$ffProfile\formhistory.sqlite",
-            "$ffProfile\logins.json",              "$ffProfile\key4.db",
-            "$ffProfile\sessionstore.jsonlz4",     "$ffProfile\sessionstore-backups",
-            "$ffProfile\storage",                  "$ffProfile\thumbnails",
-            "$ffProfile\crashes",                  "$ffProfile\datareporting"
-        )
-        Remove-ItemSafe -Paths $FirefoxItems
-    }
-}
-Remove-ItemSafe -Paths @("$TargetProfile\AppData\Local\Mozilla\Firefox\Profiles")
-
-# ------------------------------------------------------------------------------
-# 3.4 OPERA
-# ------------------------------------------------------------------------------
-Write-Host " -> Opera" -ForegroundColor White
-
-$OperaPaths = @(
-    "$TargetProfile\AppData\Roaming\Opera Software\Opera Stable",
-    "$TargetProfile\AppData\Local\Opera Software\Opera Stable",
-    "$TargetProfile\AppData\Roaming\Opera Software\Opera GX Stable",
-    "$TargetProfile\AppData\Local\Opera Software\Opera GX Stable"
+$FirefoxRoots = @(
+    "$TargetProfile\AppData\Roaming\Mozilla",
+    "$TargetProfile\AppData\Local\Mozilla"
 )
-Remove-ItemSafe -Paths $OperaPaths
+Remove-Paths -Paths $FirefoxRoots
 
-Write-Host " [OK] Navegadores limpos." -ForegroundColor Green
+Remove-RegistryKey -KeyPath "HKCU:\Software\Mozilla"
+
+# ------------------------------------------------------------------------------
+# 3.4 OPERA (todas as variantes)
+# Apaga pastas inteiras — perfis, contas Opera, cookies, sessões.
+# ------------------------------------------------------------------------------
+Write-Host " -> Opera (todas as variantes)" -ForegroundColor White
+
+$OperaRoots = @(
+    "$TargetProfile\AppData\Roaming\Opera Software",
+    "$TargetProfile\AppData\Local\Opera Software"
+)
+Remove-Paths -Paths $OperaRoots
+
+Remove-RegistryKey -KeyPath "HKCU:\Software\Opera Software"
+
+Write-Host " [OK] Navegadores RESETADOS — sem rastros do usuário." -ForegroundColor Green
 
 # ==============================================================================
-# BLOCO 4 — DESLOGAMENTO DO ECOSSISTEMA MICROSOFT
+# BLOCO 4 — DESLOGAMENTO TOTAL DO ECOSSISTEMA MICROSOFT
+# (Office, PowerBI, Windows local, Teams, Copilot)
 # ==============================================================================
 
 Write-Host ""
-Write-Host "[ETAPA 3/7] Removendo contas e tokens Microsoft..." -ForegroundColor Yellow
+Write-Host "[ETAPA 3/8] Deslogando Microsoft (Office, PowerBI, Windows, Copilot)..." -ForegroundColor Yellow
 
-# --- 4.1 MICROSOFT OFFICE ---
-Write-Host " -> Microsoft Office" -ForegroundColor White
+# ------------------------------------------------------------------------------
+# 4.1 MICROSOFT OFFICE — Identidades, tokens, licenciamento, MRU
+# ------------------------------------------------------------------------------
+Write-Host " -> Microsoft Office (Word, Excel, PowerPoint, Outlook, Teams)" -ForegroundColor White
 
-$OfficeRegistryPaths = @(
+$OfficeRegistry = @(
     "HKCU:\Software\Microsoft\Office\16.0\Common\Identity",
     "HKCU:\Software\Microsoft\Office\15.0\Common\Identity",
+    "HKCU:\Software\Microsoft\Office\Common\Identity",
     "HKCU:\Software\Microsoft\Office\16.0\Common\ServicesManagerCache",
+    "HKCU:\Software\Microsoft\Office\16.0\Common\Roaming\Identities",
     "HKCU:\Software\Microsoft\Office\16.0\Outlook\Profiles",
-    "HKCU:\Software\Microsoft\Office\Teams"
+    "HKCU:\Software\Microsoft\Office\16.0\Outlook\AutoDiscover",
+    "HKCU:\Software\Microsoft\Office\Teams",
+    "HKCU:\Software\Microsoft\Office\16.0\Common\Licensing",
+    "HKCU:\Software\Microsoft\Office\16.0\Word\File MRU",
+    "HKCU:\Software\Microsoft\Office\16.0\Excel\File MRU",
+    "HKCU:\Software\Microsoft\Office\16.0\PowerPoint\File MRU",
+    "HKCU:\Software\Microsoft\Office\16.0\OneNote\Configuration"
 )
-foreach ($regPath in $OfficeRegistryPaths) {
-    if (Test-Path $regPath) {
-        Remove-Item -Path $regPath -Recurse -Force -ErrorAction SilentlyContinue
-        Write-Host "   [DEL REG] $regPath" -ForegroundColor DarkGray
-    }
-}
+foreach ($k in $OfficeRegistry) { Remove-RegistryKey -KeyPath $k }
 
-$OfficeCachePaths = @(
+$OfficePaths = @(
     "$TargetProfile\AppData\Local\Microsoft\Office\16.0\Licensing",
-    "$TargetProfile\AppData\Local\Microsoft\TokenBroker\Cache",
+    "$TargetProfile\AppData\Local\Microsoft\Office\16.0\Wef",
+    "$TargetProfile\AppData\Local\Microsoft\Office\16.0\OfficeFileCache",
+    "$TargetProfile\AppData\Local\Microsoft\Office\16.0\Lync",
     "$TargetProfile\AppData\Local\Microsoft\Windows\INetCache\Content.MSO",
+    "$TargetProfile\AppData\Local\Microsoft\Windows\INetCache\Content.Outlook",
     "$TargetProfile\AppData\Roaming\Microsoft\Templates",
-    "$TargetProfile\AppData\Roaming\Microsoft\Office\Recent"
+    "$TargetProfile\AppData\Roaming\Microsoft\Office\Recent",
+    "$TargetProfile\AppData\Roaming\Microsoft\Outlook",
+    "$TargetProfile\AppData\Local\Microsoft\Outlook"
 )
-Remove-ItemSafe -Paths $OfficeCachePaths
+Remove-Paths -Paths $OfficePaths
 
-# --- 4.2 POWER BI DESKTOP ---
-Write-Host " -> Power BI Desktop" -ForegroundColor White
+# ------------------------------------------------------------------------------
+# 4.2 WAM, OneAuth, IdentityCache — onde Office/Windows/Copilot guardam tokens
+# ESSENCIAL para deslogar de verdade. Sem isso, o token volta sozinho.
+# ------------------------------------------------------------------------------
+Write-Host " -> WAM (Web Account Manager) + OneAuth + IdentityCache" -ForegroundColor White
 
-$PowerBIPaths = @(
-    "$TargetProfile\AppData\Local\Microsoft\Power BI Desktop",
-    "$TargetProfile\AppData\Roaming\Microsoft\Power BI Desktop",
-    "$TargetProfile\AppData\Local\Microsoft\Power BI Desktop\AnalysisServicesWorkspaces"
+$IdentityPaths = @(
+    "$TargetProfile\AppData\Local\Microsoft\TokenBroker",
+    "$TargetProfile\AppData\Local\Microsoft\TokenBroker\Cache",
+    "$TargetProfile\AppData\Local\Microsoft\OneAuth",
+    "$TargetProfile\AppData\Local\Microsoft\IdentityCache",
+    "$TargetProfile\AppData\Local\Microsoft\Windows\WebAccountManager",
+    "$TargetProfile\AppData\Local\Microsoft\Windows\CloudStore",
+    "$TargetProfile\AppData\Local\Microsoft\AAD.BrokerPlugin*",
+    "$TargetProfile\AppData\Local\Packages\Microsoft.AAD.BrokerPlugin_*",
+    "$TargetProfile\AppData\Local\ConnectedDevicesPlatform"
 )
-Remove-ItemSafe -Paths $PowerBIPaths
+Remove-Paths -Paths $IdentityPaths
 
-if (Test-Path "HKCU:\Software\Microsoft\Microsoft Power BI Desktop") {
-    Remove-Item -Path "HKCU:\Software\Microsoft\Microsoft Power BI Desktop" -Recurse -Force -ErrorAction SilentlyContinue
+# Limpa Windows Vault (Web Credentials) — onde ficam tokens de login web
+Write-Host "   -> Limpando Windows Vault (PasswordVault)..." -ForegroundColor DarkGray
+try {
+    [void][Windows.Security.Credentials.PasswordVault, Windows.Security.Credentials, ContentType=WindowsRuntime]
+    $vault = New-Object Windows.Security.Credentials.PasswordVault
+    $vault.RetrieveAll() | ForEach-Object {
+        try {
+            $vault.Remove($_)
+            Write-Host "   [DEL VAULT] $($_.Resource) ($($_.UserName))" -ForegroundColor DarkGray
+        } catch {}
+    }
+} catch {
+    Write-Host "   [SKIP] PasswordVault não disponível nesta versão." -ForegroundColor DarkYellow
 }
 
-# --- 4.3 WINDOWS ACCOUNTS — TOKENBROKER ---
-Write-Host " -> Windows TokenBroker" -ForegroundColor White
+# ------------------------------------------------------------------------------
+# 4.3 CREDENTIAL MANAGER (Generic Credentials — onde apps guardam senhas)
+# ------------------------------------------------------------------------------
+Write-Host " -> Windows Credential Manager (cmdkey)" -ForegroundColor White
 
-$TokenBrokerPaths = @(
-    "$TargetProfile\AppData\Local\Microsoft\TokenBroker",
-    "$TargetProfile\AppData\Local\Microsoft\Windows\CloudStore",
-    "$TargetProfile\AppData\Local\Microsoft\Windows\WebAccountManager"
-)
-Remove-ItemSafe -Paths $TokenBrokerPaths
-
-# --- 4.4 GERENCIADOR DE CREDENCIAIS (WINDOWS VAULT) ---
-Write-Host " -> Windows Credential Manager" -ForegroundColor White
-
-$cmdkeyList = cmdkey /list 2>$null
-if ($cmdkeyList) {
-    $cmdkeyList | Where-Object { $_ -match "^\s+Destino:\s*(.+)$" -or $_ -match "^\s+Target:\s*(.+)$" } | ForEach-Object {
-        if ($_ -match "Destino:\s*(.+)$" -or $_ -match "Target:\s*(.+)$") {
+$cmdkeyOutput = cmdkey /list 2>$null
+if ($cmdkeyOutput) {
+    $cmdkeyOutput | ForEach-Object {
+        if ($_ -match "^\s*(?:Destino|Target):\s*(.+)$") {
             $credTarget = $Matches[1].Trim()
             cmdkey /delete:"$credTarget" 2>$null | Out-Null
             Write-Host "   [DEL CRED] $credTarget" -ForegroundColor DarkGray
@@ -309,210 +363,371 @@ if ($cmdkeyList) {
     }
 }
 
-Write-Host " [OK] Ecossistema Microsoft limpo." -ForegroundColor Green
+# ------------------------------------------------------------------------------
+# 4.4 POWER BI DESKTOP
+# ------------------------------------------------------------------------------
+Write-Host " -> Power BI Desktop" -ForegroundColor White
+
+$PowerBIPaths = @(
+    "$TargetProfile\AppData\Local\Microsoft\Power BI Desktop",
+    "$TargetProfile\AppData\Roaming\Microsoft\Power BI Desktop",
+    "$TargetProfile\AppData\Local\Microsoft\Power BI Desktop Store App"
+)
+Remove-Paths -Paths $PowerBIPaths
+
+Remove-RegistryKey -KeyPath "HKCU:\Software\Microsoft\Microsoft Power BI Desktop"
+
+# ------------------------------------------------------------------------------
+# 4.5 MICROSOFT COPILOT (M365 Copilot + app standalone)
+# ------------------------------------------------------------------------------
+Write-Host " -> Microsoft Copilot" -ForegroundColor White
+
+$CopilotPaths = @(
+    "$TargetProfile\AppData\Local\Microsoft\Copilot",
+    "$TargetProfile\AppData\Roaming\Microsoft\Copilot",
+    "$TargetProfile\AppData\Local\Packages\Microsoft.Copilot_*",
+    "$TargetProfile\AppData\Local\Packages\Microsoft.MicrosoftCopilot_*"
+)
+Remove-Paths -Paths $CopilotPaths
+
+Remove-RegistryKey -KeyPath "HKCU:\Software\Microsoft\Copilot"
+
+# ------------------------------------------------------------------------------
+# 4.6 ONEDRIVE (cache + contas conectadas)
+# ------------------------------------------------------------------------------
+Write-Host " -> OneDrive (desconectar contas)" -ForegroundColor White
+
+# Faz logout do OneDrive (não desinstala)
+$OneDriveExe = "$TargetProfile\AppData\Local\Microsoft\OneDrive\OneDrive.exe"
+if (Test-Path $OneDriveExe) {
+    & $OneDriveExe /reset 2>$null
+    Start-Sleep -Seconds 2
+    Stop-ProcessSafe -ProcessName "OneDrive"
+}
+
+$OneDrivePaths = @(
+    "$TargetProfile\AppData\Local\Microsoft\OneDrive\setup\logs",
+    "$TargetProfile\AppData\Local\Microsoft\OneDrive\logs",
+    "$TargetProfile\AppData\Local\Microsoft\OneDrive\settings"
+)
+Remove-Paths -Paths $OneDrivePaths
+
+Remove-RegistryKey -KeyPath "HKCU:\Software\Microsoft\OneDrive\Accounts"
+Remove-RegistryKey -KeyPath "HKCU:\Software\Microsoft\SkyDrive"
+
+Write-Host " [OK] Microsoft DESLOGADO totalmente." -ForegroundColor Green
 
 # ==============================================================================
-# BLOCO 5 — LIMPEZA DE FERRAMENTAS DE DESENVOLVIMENTO E EDUCAÇÃO
+# BLOCO 5 — FERRAMENTAS DE DESENVOLVIMENTO E EDUCAÇÃO
 # ==============================================================================
 
 Write-Host ""
-Write-Host "[ETAPA 4/7] Limpando ferramentas de desenvolvimento..." -ForegroundColor Yellow
+Write-Host "[ETAPA 4/8] Limpando ferramentas de desenvolvimento..." -ForegroundColor Yellow
 
-Write-Host " -> Visual Studio Code" -ForegroundColor White
+# ------------------------------------------------------------------------------
+# 5.1 VISUAL STUDIO CODE (+ Insiders) — apaga TUDO, incluindo extensões e auth
+# ------------------------------------------------------------------------------
+Write-Host " -> Visual Studio Code (Stable + Insiders)" -ForegroundColor White
 
 $VSCodePaths = @(
-    "$TargetProfile\AppData\Roaming\Code\User\settings.json",
-    "$TargetProfile\AppData\Roaming\Code\User\keybindings.json",
-    "$TargetProfile\AppData\Roaming\Code\User\snippets",
-    "$TargetProfile\AppData\Roaming\Code\User\workspaceStorage",
-    "$TargetProfile\AppData\Roaming\Code\User\History",
-    "$TargetProfile\AppData\Roaming\Code\User\globalStorage",
-    "$TargetProfile\AppData\Local\Programs\Microsoft VS Code\resources\app\user-data",
-    "$TargetProfile\AppData\Roaming\Code\logs",
-    "$TargetProfile\.vscode\extensions"
+    "$TargetProfile\AppData\Roaming\Code",
+    "$TargetProfile\AppData\Roaming\Code - Insiders",
+    "$TargetProfile\.vscode",
+    "$TargetProfile\.vscode-insiders",
+    "$TargetProfile\AppData\Local\Programs\Microsoft VS Code\resources\app\user-data"
 )
-Remove-ItemSafe -Paths $VSCodePaths
+Remove-Paths -Paths $VSCodePaths
 
-Write-Host " -> Git e GitHub" -ForegroundColor White
+# ------------------------------------------------------------------------------
+# 5.2 VISUAL STUDIO (IDE completa, se instalada)
+# ------------------------------------------------------------------------------
+Write-Host " -> Visual Studio (IDE)" -ForegroundColor White
+
+$VSPaths = @(
+    "$TargetProfile\AppData\Local\Microsoft\VisualStudio",
+    "$TargetProfile\AppData\Roaming\Microsoft\VisualStudio",
+    "$TargetProfile\Documents\Visual Studio*"
+)
+Remove-Paths -Paths $VSPaths
+
+# ------------------------------------------------------------------------------
+# 5.3 GIT + GITHUB DESKTOP + GITHUB COPILOT
+# ------------------------------------------------------------------------------
+Write-Host " -> Git + GitHub Desktop + GitHub Copilot" -ForegroundColor White
 
 $GitPaths = @(
-    "$TargetProfile\.gitconfig",              "$TargetProfile\.gitconfig_local",
-    "$TargetProfile\.ssh",                    "$TargetProfile\.git-credentials",
+    "$TargetProfile\.gitconfig",
+    "$TargetProfile\.gitconfig_local",
+    "$TargetProfile\.git-credentials",
+    "$TargetProfile\.ssh",
+    "$TargetProfile\.config\github-copilot",
     "$TargetProfile\AppData\Local\GitCredentialManager",
-    "$TargetProfile\AppData\Roaming\GitHub Desktop",
-    "$TargetProfile\AppData\Local\GitHub Desktop"
+    "$TargetProfile\AppData\Local\GitHubDesktop",
+    "$TargetProfile\AppData\Roaming\GitHub Desktop"
 )
-Remove-ItemSafe -Paths $GitPaths
+Remove-Paths -Paths $GitPaths
 
-if (Test-Path "HKCU:\Software\GitCredentialManager") {
-    Remove-Item -Path "HKCU:\Software\GitCredentialManager" -Recurse -Force -ErrorAction SilentlyContinue
-}
+Remove-RegistryKey -KeyPath "HKCU:\Software\GitCredentialManager"
+Remove-RegistryKey -KeyPath "HKCU:\Software\GitForWindows"
 
+# ------------------------------------------------------------------------------
+# 5.4 CISCO PACKET TRACER
+# ------------------------------------------------------------------------------
 Write-Host " -> Cisco Packet Tracer" -ForegroundColor White
 
-$PacketTracerPaths = @(
-    "$TargetProfile\AppData\Roaming\Cisco\Packet Tracer",
-    "$TargetProfile\AppData\Local\Cisco\Packet Tracer",
+$PTPaths = @(
+    "$TargetProfile\AppData\Roaming\Cisco\Packet Tracer*",
+    "$TargetProfile\AppData\Local\Cisco\Packet Tracer*",
+    "$TargetProfile\AppData\Roaming\Cisco Packet Tracer*",
+    "$TargetProfile\AppData\Local\Cisco Packet Tracer*",
     "$TargetProfile\PT Saves",
-    "$TargetProfile\Documents\Packet Tracer"
+    "$TargetProfile\Documents\Packet Tracer",
+    "$TargetProfile\Documents\Cisco Packet Tracer*",
+    "$TargetProfile\Cisco Packet Tracer*"
 )
-Remove-ItemSafe -Paths $PacketTracerPaths
+Remove-Paths -Paths $PTPaths
 
-Get-ChildItem -Path $TargetProfile -Directory -Filter "Cisco Packet Tracer *" -ErrorAction SilentlyContinue |
-    ForEach-Object { Remove-ItemSafe -Paths @($_.FullName) }
+Remove-RegistryKey -KeyPath "HKCU:\Software\Cisco Systems"
 
-Write-Host " -> Antigravity" -ForegroundColor White
-Remove-ItemSafe -Paths @("$TargetProfile\AppData\Roaming\Antigravity", "$TargetProfile\AppData\Local\Antigravity")
+# ------------------------------------------------------------------------------
+# 5.5 GOOGLE ANTIGRAVITY (IDE com IA)
+# ------------------------------------------------------------------------------
+Write-Host " -> Google Antigravity" -ForegroundColor White
+
+$AntigravityPaths = @(
+    "$TargetProfile\AppData\Roaming\Antigravity",
+    "$TargetProfile\AppData\Local\Antigravity",
+    "$TargetProfile\.antigravity"
+)
+Remove-Paths -Paths $AntigravityPaths
+
+Remove-RegistryKey -KeyPath "HKCU:\Software\Google\Antigravity"
+
+# ------------------------------------------------------------------------------
+# 5.6 GOOGLE DRIVE (Drive for Desktop / DriveFS)
+# ------------------------------------------------------------------------------
+Write-Host " -> Google Drive (Drive for Desktop)" -ForegroundColor White
+
+$GoogleDrivePaths = @(
+    "$TargetProfile\AppData\Local\Google\DriveFS",
+    "$TargetProfile\AppData\Local\Google\Drive",
+    "$TargetProfile\AppData\Roaming\Google\Drive",
+    "$TargetProfile\Google Drive",
+    "$TargetProfile\GoogleDrive"
+)
+Remove-Paths -Paths $GoogleDrivePaths
+
+Remove-RegistryKey -KeyPath "HKCU:\Software\Google\DriveFS"
+Remove-RegistryKey -KeyPath "HKCU:\Software\Google\Drive"
 
 Write-Host " [OK] Ferramentas de desenvolvimento limpas." -ForegroundColor Green
 
 # ==============================================================================
-# BLOCO 6 — LIMPEZA DA ÁREA DE TRABALHO
+# BLOCO 6 — LIMPEZA DE PASTAS PESSOAIS (CONTEÚDO, NUNCA A PASTA)
+# Resolve caminhos via Known Folders (suporta redirecionamento OneDrive).
 # ==============================================================================
 
 Write-Host ""
-Write-Host "[ETAPA 5/7] Limpando Área de Trabalho do usuário..." -ForegroundColor Yellow
+Write-Host "[ETAPA 5/8] Limpando CONTEÚDO de pastas pessoais..." -ForegroundColor Yellow
+Write-Host "   (As pastas em si NÃO serão removidas — apenas seu conteúdo)" -ForegroundColor DarkCyan
 
-$DesktopPath          = "$TargetProfile\Desktop"
-$ProtectedExtensions  = @(".lnk", ".ini", ".url")
+# ------------------------------------------------------------------------------
+# FUNÇÃO: Clear-FolderContents — apaga apenas itens DENTRO da pasta
+# Garante que a pasta raiz NUNCA é removida.
+# ------------------------------------------------------------------------------
+function Clear-FolderContents {
+    param(
+        [string]$FolderPath,
+        [string]$Label,
+        [string[]]$ProtectedExtensions = @()
+    )
 
-if (Test-Path $DesktopPath) {
-    Get-ChildItem -Path $DesktopPath -Force | ForEach-Object {
-        $item          = $_
-        $shouldProtect = $false
+    Write-Host " -> $Label" -ForegroundColor White
 
-        if (-not $item.PSIsContainer) {
+    if ([string]::IsNullOrWhiteSpace($FolderPath)) {
+        Write-Host "   [SKIP] Caminho vazio." -ForegroundColor DarkYellow
+        return
+    }
+
+    if (-not (Test-Path -LiteralPath $FolderPath)) {
+        Write-Host "   [SKIP] Pasta não encontrada: $FolderPath" -ForegroundColor DarkYellow
+        return
+    }
+
+    Write-Host "   Caminho real: $FolderPath" -ForegroundColor DarkGray
+
+    $items = @(Get-ChildItem -LiteralPath $FolderPath -Force -ErrorAction SilentlyContinue)
+
+    if ($items.Count -eq 0) {
+        Write-Host "   [OK] Pasta já está vazia." -ForegroundColor DarkGreen
+        return
+    }
+
+    $deleted = 0
+    $kept    = 0
+    $failed  = 0
+
+    foreach ($item in $items) {
+        # Proteção: NUNCA toca em desktop.ini (mantém configuração da pasta)
+        if ($item.Name -ieq "desktop.ini") {
+            $kept++
+            continue
+        }
+
+        # Proteção opcional: preserva atalhos (.lnk, .url) na Área de Trabalho
+        if (-not $item.PSIsContainer -and $ProtectedExtensions.Count -gt 0) {
+            $shouldProtect = $false
             foreach ($ext in $ProtectedExtensions) {
-                if ($item.Extension -ieq $ext) {
-                    $shouldProtect = $true
-                    break
-                }
+                if ($item.Extension -ieq $ext) { $shouldProtect = $true; break }
+            }
+            if ($shouldProtect) {
+                Write-Host "   [KEEP] $($item.Name)" -ForegroundColor DarkCyan
+                $kept++
+                continue
             }
         }
 
-        if (-not $shouldProtect) {
-            Remove-Item -Path $item.FullName -Recurse -Force -ErrorAction SilentlyContinue
-            Write-Host "   [DEL]  Desktop\$($item.Name)" -ForegroundColor DarkGray
+        if (Force-RemoveItem -Path $item.FullName) {
+            $deleted++
         } else {
-            Write-Host "   [KEEP] Desktop\$($item.Name)" -ForegroundColor DarkCyan
+            $failed++
+            Write-Host "   [FAIL] $($item.Name) — em uso ou bloqueado" -ForegroundColor Red
         }
+    }
+
+    Write-Host "   [OK] $Label — Removidos: $deleted | Preservados: $kept | Falhas: $failed" -ForegroundColor Green
+}
+
+# ------------------------------------------------------------------------------
+# Resolve caminhos REAIS das pastas conhecidas
+# (usa GetFolderPath — funciona mesmo se OneDrive redirecionou)
+# ------------------------------------------------------------------------------
+$PathDesktop   = [Environment]::GetFolderPath("Desktop")
+$PathDocuments = [Environment]::GetFolderPath("MyDocuments")
+$PathPictures  = [Environment]::GetFolderPath("MyPictures")
+$PathVideos    = [Environment]::GetFolderPath("MyVideos")
+$PathMusic     = [Environment]::GetFolderPath("MyMusic")
+
+# Downloads não tem GetFolderPath — busca no registry
+$DownloadsGuid = "{374DE290-123F-4565-9164-39C4925E467B}"
+$PathDownloads = (Get-ItemProperty `
+    -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" `
+    -Name $DownloadsGuid -ErrorAction SilentlyContinue).$DownloadsGuid
+if ($PathDownloads) {
+    $PathDownloads = [Environment]::ExpandEnvironmentVariables($PathDownloads)
+} else {
+    $PathDownloads = "$TargetProfile\Downloads"
+}
+
+# Limpa cada pasta — Desktop preserva atalhos (.lnk/.url) e .ini
+Clear-FolderContents -FolderPath $PathDesktop   -Label "Área de Trabalho" `
+    -ProtectedExtensions @(".lnk", ".url", ".ini")
+Clear-FolderContents -FolderPath $PathDownloads -Label "Downloads"
+Clear-FolderContents -FolderPath $PathDocuments -Label "Documentos"
+Clear-FolderContents -FolderPath $PathPictures  -Label "Imagens"
+Clear-FolderContents -FolderPath $PathVideos    -Label "Vídeos"
+Clear-FolderContents -FolderPath $PathMusic     -Label "Música"
+
+# Limpa também caminhos físicos (caso OneDrive tenha redirecionado e
+# arquivos antigos ainda estejam no caminho local original)
+$LegacyPaths = @{
+    "Desktop (legado)"    = "$TargetProfile\Desktop"
+    "Downloads (legado)"  = "$TargetProfile\Downloads"
+    "Documents (legado)"  = "$TargetProfile\Documents"
+    "Pictures (legado)"   = "$TargetProfile\Pictures"
+    "Videos (legado)"     = "$TargetProfile\Videos"
+    "Music (legado)"      = "$TargetProfile\Music"
+}
+
+foreach ($entry in $LegacyPaths.GetEnumerator()) {
+    $alreadyCleaned = @($PathDesktop, $PathDownloads, $PathDocuments,
+                        $PathPictures, $PathVideos, $PathMusic) -contains $entry.Value
+    if (-not $alreadyCleaned -and (Test-Path -LiteralPath $entry.Value)) {
+        Clear-FolderContents -FolderPath $entry.Value -Label $entry.Key
     }
 }
 
-Write-Host " [OK] Área de Trabalho limpa." -ForegroundColor Green
+Write-Host " [OK] Pastas pessoais limpas (conteúdo apagado, pastas preservadas)." -ForegroundColor Green
 
 # ==============================================================================
-# BLOCO 6.5 — RESTAURAÇÃO COMPLETA DAS PASTAS PESSOAIS
+# BLOCO 7 — BLOCO DE NOTAS (Windows 11) + APPS UWP
 # ==============================================================================
 
 Write-Host ""
-Write-Host "[ETAPA 6/7] Restauração completa — Pastas pessoais do usuário..." -ForegroundColor Yellow
+Write-Host "[ETAPA 6/8] Limpando apps UWP (Bloco de Notas)..." -ForegroundColor Yellow
 
-function Clear-UserFolder {
-    param([string]$FolderPath, [string]$FolderLabel)
-    Write-Host " -> $FolderLabel" -ForegroundColor White
-    if (-not (Test-Path $FolderPath)) { return }
-    Get-ChildItem -Path $FolderPath -Force -ErrorAction SilentlyContinue | ForEach-Object {
-        Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-    }
-}
-
-$PathDownloads = "$TargetProfile\Downloads"
-$PathDocuments = "$TargetProfile\Documents"
-$PathPictures  = "$TargetProfile\Pictures"
-$PathVideos    = "$TargetProfile\Videos"
-$PathMusic     = "$TargetProfile\Music"
-
-Clear-UserFolder -FolderPath $PathDownloads -FolderLabel "Downloads"
-Clear-UserFolder -FolderPath $PathDocuments -FolderLabel "Documentos"
-Clear-UserFolder -FolderPath $PathPictures  -FolderLabel "Fotos"
-Clear-UserFolder -FolderPath $PathVideos    -FolderLabel "Vídeos"
-Clear-UserFolder -FolderPath $PathMusic     -FolderLabel "Música"
-
-Write-Host " -> OneDrive (cache local)" -ForegroundColor White
-
-$OneDrivePaths = @("$TargetProfile\OneDrive", "$TargetProfile\OneDrive - *")
-foreach ($odPath in $OneDrivePaths) {
-    $resolvedPaths = Resolve-Path -Path $odPath -ErrorAction SilentlyContinue
-    foreach ($rp in $resolvedPaths) {
-        if (Test-Path $rp.Path) {
-            Get-ChildItem -Path $rp.Path -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                if (-not ($_.Attributes -band [System.IO.FileAttributes]::System)) {
-                    Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-                }
-            }
-        }
-    }
-}
-
-$OneDriveRegPaths = @("HKCU:\Software\Microsoft\OneDrive\Accounts", "HKCU:\Software\Microsoft\SkyDrive")
-foreach ($regPath in $OneDriveRegPaths) {
-    if (Test-Path $regPath) {
-        Remove-Item -Path $regPath -Recurse -Force -ErrorAction SilentlyContinue
-    }
-}
-
-Write-Host " [OK] Pastas pessoais limpas." -ForegroundColor Green
-
-# ==============================================================================
-# BLOCO 7 — BLOCO DE NOTAS (WINDOWS 11)
-# ==============================================================================
-
-Write-Host ""
-Write-Host "[ETAPA 7/7] Limpando cache do Bloco de Notas..." -ForegroundColor Yellow
-
-$UWPPackagesRoot = "$TargetProfile\AppData\Local\Packages"
-if (Test-Path $UWPPackagesRoot) {
-    Get-ChildItem -Path $UWPPackagesRoot -Directory -Filter "*WindowsNotepad*" -ErrorAction SilentlyContinue |
+$UWPRoot = "$TargetProfile\AppData\Local\Packages"
+if (Test-Path $UWPRoot) {
+    Get-ChildItem -Path $UWPRoot -Directory -Filter "*WindowsNotepad*" -ErrorAction SilentlyContinue |
         ForEach-Object {
-            $notepadPkg = $_.FullName
-            Remove-ItemSafe -Paths @(
-                "$notepadPkg\LocalState",  "$notepadPkg\Settings",
-                "$notepadPkg\RoamingState","$notepadPkg\TempState"
+            $pkg = $_.FullName
+            Remove-Paths -Paths @(
+                "$pkg\LocalState", "$pkg\Settings", "$pkg\RoamingState", "$pkg\TempState"
             )
         }
 }
 
-Remove-ItemSafe -Paths @("$TargetProfile\AppData\Roaming\Microsoft\Windows\Recent\*.txt")
+Remove-Paths -Paths @("$TargetProfile\AppData\Roaming\Microsoft\Windows\Recent\*.txt")
 
-Write-Host " [OK] Bloco de Notas resetado." -ForegroundColor Green
+Write-Host " [OK] Apps UWP limpos." -ForegroundColor Green
 
 # ==============================================================================
-# BLOCO 8 — LIMPEZA COMPLEMENTAR
+# BLOCO 8 — HIGIENE COMPLEMENTAR (TEMP, MRU, RECENT)
 # ==============================================================================
 
 Write-Host ""
-Write-Host "[COMPLEMENTAR] Higiene adicional do perfil..." -ForegroundColor Yellow
+Write-Host "[ETAPA 7/8] Higiene complementar do perfil..." -ForegroundColor Yellow
 
 $TempPaths = @(
     "$TargetProfile\AppData\Local\Temp",
     "$TargetProfile\AppData\Roaming\Microsoft\Windows\Recent",
     "$TargetProfile\AppData\Local\Microsoft\Windows\Explorer",
-    "$TargetProfile\AppData\Local\Microsoft\Windows\INetCache"
+    "$TargetProfile\AppData\Local\Microsoft\Windows\INetCache",
+    "$TargetProfile\AppData\Local\Microsoft\Windows\WebCache",
+    "$TargetProfile\AppData\Local\CrashDumps"
 )
-Remove-ItemSafe -Paths $TempPaths
+Remove-Paths -Paths $TempPaths
 
+# Reset histórico de área de transferência
 try {
-    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Clipboard" -Name "EnableClipboardHistory" -Value 0 -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Clipboard" -Name "EnableClipboardHistory" -Value 1 -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Clipboard" `
+        -Name "EnableClipboardHistory" -Value 0 -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Clipboard" `
+        -Name "EnableClipboardHistory" -Value 1 -ErrorAction SilentlyContinue
 } catch {}
 
-$RecentRegistryKeys = @(
-    "HKCU:\Software\Microsoft\Office\16.0\Word\File MRU",
-    "HKCU:\Software\Microsoft\Office\16.0\Excel\File MRU",
-    "HKCU:\Software\Microsoft\Office\16.0\PowerPoint\File MRU",
+# Apaga MRUs (Most Recently Used) do Explorer e diálogos Open/Save
+$MRUKeys = @(
     "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RecentDocs",
     "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU",
-    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\ComDlg32\OpenSavePidlMRU"
+    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\TypedPaths",
+    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\ComDlg32\OpenSavePidlMRU",
+    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\ComDlg32\LastVisitedPidlMRU"
 )
-
-foreach ($regPath in $RecentRegistryKeys) {
-    if (Test-Path $regPath) {
-        Remove-Item -Path $regPath -Recurse -Force -ErrorAction SilentlyContinue
-    }
-}
+foreach ($k in $MRUKeys) { Remove-RegistryKey -KeyPath $k }
 
 Write-Host " [OK] Higiene complementar concluída." -ForegroundColor Green
+
+# ==============================================================================
+# BLOCO 9 — VERIFICAÇÃO FINAL
+# ==============================================================================
+
+Write-Host ""
+Write-Host "[ETAPA 8/8] Verificação final..." -ForegroundColor Yellow
+
+$VerifyChrome = Test-Path "$TargetProfile\AppData\Local\Google\Chrome\User Data\Default"
+$VerifyEdge   = Test-Path "$TargetProfile\AppData\Local\Microsoft\Edge\User Data\Default"
+$VerifyFF     = Test-Path "$TargetProfile\AppData\Roaming\Mozilla\Firefox\Profiles"
+$VerifyOffice = Test-Path "HKCU:\Software\Microsoft\Office\16.0\Common\Identity"
+
+Write-Host "   Chrome (User Data\Default existe?)  : $VerifyChrome" `
+    -ForegroundColor $(if ($VerifyChrome) { "Red" } else { "Green" })
+Write-Host "   Edge   (User Data\Default existe?)  : $VerifyEdge" `
+    -ForegroundColor $(if ($VerifyEdge)   { "Red" } else { "Green" })
+Write-Host "   Firefox (Profiles existe?)          : $VerifyFF" `
+    -ForegroundColor $(if ($VerifyFF)     { "Red" } else { "Green" })
+Write-Host "   Office Identity (registry existe?)  : $VerifyOffice" `
+    -ForegroundColor $(if ($VerifyOffice) { "Red" } else { "Green" })
 
 # ==============================================================================
 # FINALIZAÇÃO
@@ -520,11 +735,20 @@ Write-Host " [OK] Higiene complementar concluída." -ForegroundColor Green
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host " RESET DE SESSÃO CONCLUÍDO COM SUCESSO!"                     -ForegroundColor Green
+Write-Host " RESET DE SESSÃO CONCLUÍDO!"                                 -ForegroundColor Green
 Write-Host " Usuário resetado : $TargetUser"                             -ForegroundColor Cyan
+Write-Host " Itens removidos  : $Script:TotalDeleted"                    -ForegroundColor Cyan
+Write-Host " Falhas           : $Script:TotalFailed"                     -ForegroundColor $(if ($Script:TotalFailed -gt 0) { "Yellow" } else { "Cyan" })
 Write-Host " Data/Hora        : $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host ""
+
+if ($Script:TotalFailed -gt 0) {
+    Write-Host "AVISO: Alguns itens nao puderam ser removidos (provavelmente em uso)." -ForegroundColor Yellow
+    Write-Host "       Reinicie a maquina e execute o script novamente para garantir." -ForegroundColor Yellow
+    Write-Host ""
+}
+
 Write-Host "A máquina está pronta para o próximo aluno." -ForegroundColor White
 Write-Host ""
 Write-Host "Esta janela fechará automaticamente em 5 segundos..." -ForegroundColor DarkGray
